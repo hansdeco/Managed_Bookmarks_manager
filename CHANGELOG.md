@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.9.2.0
+
+### EXE startup and path handling
+
+- Added packaged-app detection so startup and shutdown `Write-Host` messages are suppressed when the tool runs as a converted `.exe`.
+- Added exe-friendly asset resolution for the config file and output module by searching the script folder, startup folder and parent folders before falling back.
+- Added save/export fallbacks so JSON and generated scripts can still be written through a normal save dialog when config-based base paths are unavailable.
+
 ## 2.9.1.0
 
 ### Documentation and licensing
@@ -361,3 +369,5 @@
 - JSON generated via indented `Node-ToJson` (replaced in v1.1 with compact formatter).
 - Copy to clipboard button.
 - `SplitContainer` (horizontal) divides the tree (top) from the JSON preview (bottom).
+
+
