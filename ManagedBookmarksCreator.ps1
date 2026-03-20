@@ -1,4 +1,4 @@
-﻿<#
+<#
     .SYNOPSIS
         GUI tool to create and edit a ManagedBookmarks JSON for Chrome / Edge policies.
 
@@ -36,42 +36,116 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 #endregion
 
+function Test-HasText {
+    param([string]$Value)
+    return -not [string]::IsNullOrWhiteSpace($Value)
+}
+
+$script:isPackagedExecutable = $false
+try {
+    $currentProcessPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $processName = [System.IO.Path]::GetFileNameWithoutExtension($currentProcessPath)
+    $script:isPackagedExecutable = @('powershell', 'pwsh', 'powershell_ise') -notcontains $processName
+}
+catch {
+    $script:isPackagedExecutable = $false
+}
+
+function Write-AppHostMessage {
+    param(
+        [string]$Message,
+        [string]$Color = 'Gray'
+    )
+
+    if ($script:isPackagedExecutable) { return }
+    Write-Host $Message -ForegroundColor $Color
+}
+
+function Get-AppSearchRoots {
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @(
+            $PSScriptRoot,
+            [System.Windows.Forms.Application]::StartupPath,
+            (Split-Path -Parent ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)),
+            (Get-Location).Path
+        )) {
+        if ((Test-HasText $candidate) -and (Test-Path -LiteralPath $candidate) -and -not $roots.Contains($candidate)) {
+            $roots.Add($candidate) | Out-Null
+        }
+    }
+    return $roots
+}
+
+function Resolve-AppAssetPath {
+    param(
+        [string[]]$RelativeCandidates
+    )
+
+    foreach ($root in (Get-AppSearchRoots)) {
+        foreach ($relativePath in $RelativeCandidates) {
+            if (-not (Test-HasText $relativePath)) { continue }
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $root $relativePath))
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    return $null
+}
 #region ── Config ────────────────────────────────────────────────────────────
-# Default: relative path from script location → ..\..\ConfigFiles\Decoster.tech.config.base.psd1
-# When the config file is placed next to this script, use:
-#   $GLB_configPath = Join-Path $PSScriptRoot "Decoster.tech.config.base.psd1"
-$GLB_configPath        = Join-Path $PSScriptRoot "\ConfigFiles\Decoster.tech.config.base.psd1"
+# Supports both:
+# - running the .ps1 from GUI\ManagedBookmarksCreator
+# - running a converted .exe from the same folder
 $GLB_jsonBasePath      = $null
 $GLB_scriptBasePath    = $null
 $GLB_companyName       = $null
 $GLB_companyAuthor     = $null
 $GLB_companyRegBase    = $null
+$GLB_config            = $null
+$GLB_configPath        = Resolve-AppAssetPath @(
+    'Decoster.tech.config.base.psd1',
+    'ConfigFiles\Decoster.tech.config.base.psd1',
+    '..\ConfigFiles\Decoster.tech.config.base.psd1',
+    '..\..\ConfigFiles\Decoster.tech.config.base.psd1'
+)
 try {
+    if (-not (Test-HasText $GLB_configPath)) {
+        throw "Config file not found."
+    }
     $GLB_config        = Import-PowerShellDataFile -Path $GLB_configPath -ErrorAction Stop
     $GLB_jsonBasePath  = $GLB_config.Paths.JsonBasePath
     $GLB_scriptBasePath = $GLB_config.Paths.ScriptBasePath
     $GLB_companyName   = $GLB_config.Company.Name
     $GLB_companyAuthor = $GLB_config.Company.Author
     $GLB_companyRegBase = $GLB_config.Company.RegistryBase
-    Write-Host "Config loaded." -ForegroundColor Cyan
+    Write-AppHostMessage "Config loaded." "Cyan"
 }
 catch {
-    Write-Host "Config not found — JSON will be saved to the last used folder." -ForegroundColor Yellow
+    Write-AppHostMessage "Config not found — JSON will be saved to the last used folder." "Yellow"
 }
 #endregion
 
 #region ── Output module ─────────────────────────────────────────────────────
-$GLB_outputModulePath      = Join-Path $PSScriptRoot "\Classes\Decoster.tech.output.psm1"
+$GLB_outputModulePath      = Resolve-AppAssetPath @(
+    'Decoster.tech.output.psm1',
+    'Classes\Decoster.tech.output.psm1',
+    '..\Classes\Decoster.tech.output.psm1',
+    '..\..\Classes\Decoster.tech.output.psm1'
+)
 $script:outputModuleLoaded = $false
 try {
     # -Force ensures an already-loaded module is always reloaded from disk,
     # picking up any new exported functions added since the session started.
+    if (-not (Test-HasText $GLB_outputModulePath)) {
+        throw "Output module not found."
+    }
     Import-Module $GLB_outputModulePath -Force -ErrorAction Stop
     $script:outputModuleLoaded = $true
-    Write-Host "Output module loaded." -ForegroundColor Cyan
+    Write-AppHostMessage "Output module loaded." "Cyan"
 }
 catch {
-    Write-Host "Output module not found — using built-in styling." -ForegroundColor Yellow
+    Write-AppHostMessage "Output module not found — using built-in styling." "Yellow"
 }
 #endregion
 
@@ -84,7 +158,7 @@ if ($null -ne $GLB_config -and $script:outputModuleLoaded) {
         -RequiredKeys @('Logging.BasePath','Logging.LogRetentionDays','Paths.JsonBasePath',
                         'Paths.ScriptBasePath','Company.Name','Company.Author','Company.RegistryBase')
     if ($script:configWarnings.Count -gt 0) {
-        Write-Host "Config incomplete — missing keys: $($script:configWarnings -join ', ')" -ForegroundColor Yellow
+        Write-AppHostMessage "Config incomplete — missing keys: $($script:configWarnings -join ', ')" "Yellow"
     }
 }
 #endregion
@@ -143,7 +217,7 @@ function Add-LogEntry {
         }
     }
     catch {
-        Write-Host "[Log] $State : $Text $(if($Detail){"| $Detail"}) — $($_.Exception.Message)" -ForegroundColor DarkYellow
+        Write-AppHostMessage "[Log] $State : $Text $(if($Detail){"| $Detail"}) — $($_.Exception.Message)" "DarkYellow"
     }
 }
 
@@ -657,6 +731,29 @@ function Show-SaveNameDialog($savePath) {
     return $null
 }
 
+function Show-SaveFileDialog {
+    param(
+        [string]$Title,
+        [string]$Filter,
+        [string]$DefaultFileName,
+        [string]$InitialDirectory = ""
+    )
+
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = $Title
+    $dlg.Filter = $Filter
+    $dlg.FileName = $DefaultFileName
+    if ((Test-HasText $InitialDirectory) -and (Test-Path -LiteralPath $InitialDirectory)) {
+        $dlg.InitialDirectory = $InitialDirectory
+    }
+
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and (Test-HasText $dlg.FileName)) {
+        return $dlg.FileName
+    }
+
+    return $null
+}
+
 function Show-ExportScriptDialog {
     $dlg = New-StyledDialog "Export Deployment Script" 480 230
     $dlg.Controls.AddRange(@(
@@ -1008,10 +1105,8 @@ $form.add_Load({
     if ($script:configWarnings.Count -gt 0) {
         Set-StatusLabel $actionLabel "Config incomplete — missing keys: $($script:configWarnings -join ', ')" 'warn'
     }
-    # Show the Export Script button only when the config is loaded and ScriptBasePath is set
-    if ($GLB_scriptBasePath) {
-        $btnExportScript.Available = $true
-    }
+    $btnExportScript.Available = $true
+
 })
 $form.add_Resize({ Invoke-Layout })
 #endregion
@@ -1177,7 +1272,7 @@ $btnLoad.add_Click({
     $ofd        = New-Object System.Windows.Forms.OpenFileDialog
     $ofd.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
     $ofd.Title  = "Load ManagedBookmarks JSON"
-    if ($GLB_jsonBasePath -and (Test-Path $GLB_jsonBasePath)) { $ofd.InitialDirectory = $GLB_jsonBasePath }
+    if ((Test-HasText $GLB_jsonBasePath) -and (Test-Path -LiteralPath $GLB_jsonBasePath)) { $ofd.InitialDirectory = $GLB_jsonBasePath }
     if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
     Add-LogEntry "Loading file" 'step'
     Add-LogKeyValue "Path" $ofd.FileName
@@ -1199,9 +1294,9 @@ $btnLoad.add_Click({
 $btnSave.add_Click({
     # When JsonBasePath is configured: ask only for a filename, create the folder if needed,
     # and save there directly. Otherwise: fall back to the standard SaveFileDialog.
-    if ($GLB_jsonBasePath) {
+    if (Test-HasText $GLB_jsonBasePath) {
         # Create the folder automatically when it does not exist yet
-        if (-not (Test-Path $GLB_jsonBasePath)) {
+        if (-not (Test-Path -LiteralPath $GLB_jsonBasePath)) {
             New-Item -ItemType Directory -Path $GLB_jsonBasePath -Force | Out-Null
         }
         $fileName = Show-SaveNameDialog $GLB_jsonBasePath
@@ -1216,12 +1311,8 @@ $btnSave.add_Click({
             if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
     } else {
-        $sfd          = New-Object System.Windows.Forms.SaveFileDialog
-        $sfd.Filter   = "JSON files (*.json)|*.json|All files (*.*)|*.*"
-        $sfd.Title    = "Save ManagedBookmarks JSON"
-        $sfd.FileName = "managed_bookmarks.json"
-        if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
-        $targetPath = $sfd.FileName
+        $targetPath = Show-SaveFileDialog -Title "Save ManagedBookmarks JSON" -Filter "JSON files (*.json)|*.json|All files (*.*)|*.*" -DefaultFileName "managed_bookmarks.json" -InitialDirectory ([System.Windows.Forms.Application]::StartupPath)
+        if (-not (Test-HasText $targetPath)) { return }
     }
 
     Add-LogEntry "Saving file" 'step'
@@ -1277,13 +1368,16 @@ $btnExportScript.add_Click({
         -Date          $dateStr `
         -Version       $version
 
-    # Ensure target folder exists, then save
-    if (-not (Test-Path $GLB_scriptBasePath)) {
-        New-Item -ItemType Directory -Path $GLB_scriptBasePath -Force | Out-Null
-    }
-
     $fileName   = "$scriptName.ps1"
-    $targetPath = Join-Path $GLB_scriptBasePath $fileName
+    if (Test-HasText $GLB_scriptBasePath) {
+        if (-not (Test-Path -LiteralPath $GLB_scriptBasePath)) {
+            New-Item -ItemType Directory -Path $GLB_scriptBasePath -Force | Out-Null
+        }
+        $targetPath = Join-Path $GLB_scriptBasePath $fileName
+    } else {
+        $targetPath = Show-SaveFileDialog -Title "Export Deployment Script" -Filter "PowerShell scripts (*.ps1)|*.ps1|All files (*.*)|*.*" -DefaultFileName $fileName -InitialDirectory ([System.Windows.Forms.Application]::StartupPath)
+        if (-not (Test-HasText $targetPath)) { return }
+    }
 
     # Overwrite confirmation
     if (Test-Path $targetPath) {
@@ -1465,11 +1559,14 @@ if ($script:outputModuleLoaded -and $GLB_logPath -and $logListBox.Items.Count -g
     try {
         Write-DecosterOutputLog -Listbox $logListBox -LogPath $GLB_logPath `
             -Username $env:USERNAME -Suffix "ManagedBookmarksCreator"
-        Write-Host "Log written to: $GLB_logPath" -ForegroundColor Cyan
+        Write-AppHostMessage "Log written to: $GLB_logPath" "Cyan"
     }
     catch {
-        Write-Host "Could not write log: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-AppHostMessage "Could not write log: $($_.Exception.Message)" "Yellow"
     }
 }
 #endregion
+
+
+
 
