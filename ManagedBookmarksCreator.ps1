@@ -1,4 +1,4 @@
-<#
+﻿<#
     .SYNOPSIS
         GUI tool to create and edit a ManagedBookmarks JSON for Chrome / Edge policies.
 
