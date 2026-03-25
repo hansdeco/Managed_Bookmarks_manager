@@ -1,6 +1,6 @@
 # User Manual - Managed Bookmarks Creator
 
-**Version:** 2.9.1.0
+**Version:** 2.11.0.0
 **Author:** Decoster Hans
 **Script:** `ManagedBookmarksCreator.ps1`
 
@@ -11,21 +11,22 @@
 1. [Overview](#overview)
 2. [Credits and AI assistance](#credits-and-ai-assistance)
 3. [License](#license)
-4. [Requirements](#requirements)
-5. [Configuration file](#configuration-file)
-6. [Starting the tool](#starting-the-tool)
-7. [Toolbar reference](#toolbar-reference)
-8. [Building a bookmark structure](#building-a-bookmark-structure)
-9. [Importing existing JSON](#importing-existing-json)
-10. [Reading from the registry](#reading-from-the-registry)
-11. [Writing directly to the registry](#writing-directly-to-the-registry)
-12. [Saving and loading JSON files](#saving-and-loading-json-files)
-13. [Exporting a deployment script](#exporting-a-deployment-script)
-14. [Deploying the generated script](#deploying-the-generated-script)
-15. [Logging](#logging)
-16. [Strong points](#strong-points)
-17. [Weak points](#weak-points)
-18. [Next to-do's](#next-to-dos)
+4. [Public repository](#public-repository)
+5. [Requirements](#requirements)
+6. [Configuration file](#configuration-file)
+7. [Starting the tool](#starting-the-tool)
+8. [Recovery and autosave](#recovery-and-autosave)
+9. [Toolbar reference](#toolbar-reference)
+10. [Building a bookmark structure](#building-a-bookmark-structure)
+11. [Importing existing JSON](#importing-existing-json)
+12. [Reading from the registry](#reading-from-the-registry)
+13. [Writing directly to the registry](#writing-directly-to-the-registry)
+14. [Saving and loading JSON files](#saving-and-loading-json-files)
+15. [Exporting a deployment script](#exporting-a-deployment-script)
+16. [Deploying the generated script](#deploying-the-generated-script)
+17. [Logging](#logging)
+18. [Strong points](#strong-points)
+19. [Weak points](#weak-points)
 
 ---
 
@@ -71,6 +72,23 @@ In practical terms, the MIT License means:
 
 The MIT License is a short and permissive open-source license. It gives broad freedom to use
 the application, but it also makes clear that the software comes without guarantees or support obligations.
+
+---
+
+## Public repository
+
+The source code for this tool is publicly available on GitHub:
+
+**[https://github.com/hansdeco/Managed_Bookmarks_manager](https://github.com/hansdeco/Managed_Bookmarks_manager)**
+
+The repository contains:
+
+- The main script `ManagedBookmarksCreator.ps1`
+- This user manual
+- The changelog
+- Assets (toolbar icons, application images)
+
+Bug reports, feature requests, and contributions are welcome via the repository's Issues and Pull Requests.
 
 ---
 
@@ -152,7 +170,32 @@ On startup the script:
 3. Loads the output module silently if present.
 4. Validates all required config keys and shows a warning in the status bar if any are missing.
 5. Cleans up log files older than `LogRetentionDays`.
-6. Opens the GUI, with `Admin: ` prefixed to the title bar when elevated.
+6. Checks for an unclean previous session and offers to restore the last autosave snapshot.
+7. Opens the GUI, with `Admin: ` prefixed to the title bar when elevated.
+
+---
+
+## Recovery and autosave
+
+The editor now includes a built-in session recovery flow to reduce data loss after an unexpected close.
+
+### How it works
+
+- Recovery data is stored per user in `%LOCALAPPDATA%\ManagedBookmarksCreator\Recovery`.
+- On startup the tool creates a `session.lock` marker and removes it on clean shutdown.
+- The current editor state is marked as **dirty** whenever content changes.
+- A debounce timer (`15` seconds) writes `latest.state.json` only when there are unsaved changes.
+- On clean close, a final snapshot is written and the lock file is removed.
+
+### Recovery prompt
+
+When the previous session ended unexpectedly (for example a crash or forced close), the lock marker is still present.
+At next startup, the tool prompts whether to restore the latest snapshot.
+
+- **Yes**: restore top-level label and full bookmark tree from the snapshot.
+- **No**: keep current empty/new state and continue normally.
+
+If recovery data is missing or invalid, startup continues safely without blocking the GUI.
 
 ---
 
@@ -168,9 +211,12 @@ On startup the script:
 | `Delete` | Delete the selected item with confirmation | No |
 | `Up` | Move the selected item one position up | No |
 | `Down` | Move the selected item one position down | No |
+| `Undo` | Revert the previous editor change | No |
+| `Redo` | Re-apply the most recently undone change | No |
 | `Load` | Load an existing `managed_bookmarks.json` from disk | No |
 | `Save` | Save the current JSON to `JsonBasePath` or a file dialog | No |
 | `Copy` | Copy the compact JSON to the clipboard | No |
+| `Validate` | Run JSON roundtrip contract test (build -> import -> build) | No |
 | `Export Script` | Generate a registry deployment `.ps1` when config is complete | No |
 | `Write to Registry` | Write bookmarks directly to HKLM for Chrome and Edge | Yes |
 
@@ -179,6 +225,8 @@ is not set.
 
 The **Write to Registry** button and the **Registry** tab are hidden when the script is not
 running with Administrator rights.
+
+The **Undo** and **Redo** buttons are enabled only when the corresponding history stack contains items.
 
 ---
 
@@ -376,11 +424,19 @@ Common deployment options:
 
 ## Logging
 
-When the output module and config are present, a session log is written to:
+When the output module and config are present, a formatted session log is written to:
 
 ```text
 <Logging.BasePath>\ManagedBookmarksCreator\<username>_<yyyyMMdd_HHmmss>_ManagedBookmarksCreator.txt
 ```
+
+In addition, the application now keeps a plain-text fallback log in:
+
+```text
+%LOCALAPPDATA%\Decoster.tech\ManagedBookmarksCreator\Logs\<username>_<yyyyMMdd_HHmmss>_ManagedBookmarksCreator.log
+```
+
+This fallback log is intended for diagnostics and remains available even when the optional output module is not installed.
 
 The startup log includes:
 
@@ -396,6 +452,15 @@ The startup log includes:
 
 All actions performed during the session are logged: folder and link additions, edits,
 deletions, file loads, saves, imports, registry reads, registry writes, and exports.
+
+The logging layer now also captures additional runtime failures:
+
+- explicitly handled action errors from `try/catch` blocks,
+- new PowerShell runtime errors detected in the global `$Error` buffer,
+- unhandled WinForms UI exceptions, and
+- unhandled AppDomain exceptions.
+
+This means the log now covers a much larger part of the errors that would normally be visible in a PowerShell session.
 Log files older than `LogRetentionDays` are deleted automatically on the next startup.
 
 ---
@@ -404,15 +469,20 @@ Log files older than `LogRetentionDays` are deleted automatically on the next st
 
 - **No dependencies for basic use** - runs standalone without config or output module.
 - **Admin-mode detection** - elevated privileges are detected at startup and unlock admin-only features automatically.
+- **Session recovery and autosave** - unexpected shutdowns can be restored from the last snapshot.
 - **Direct registry read** - the Registry tab lets admins inspect the currently active policy directly from `HKLM`.
 - **Direct registry write** - the Write to Registry button applies the policy immediately on the target machine.
 - **Dual JSON format support** - imports both direct arrays and wrapper objects such as `ManagedBookmarks` and `ManagedFavorites`.
+- **Undo/redo history** - most editor operations can be reverted without reloading from disk.
+- **Contract validation** - built-in roundtrip test helps detect import/export drift early.
+- **URL validation** - link dialogs validate format and limit entries to `http`/`https` URLs.
 - **PS 5.1 compatible** - explicit wrapping guards against single-element array unwrapping.
 - **Folder auto-creation** - `JsonBasePath` and `ScriptBasePath` are created on the fly.
 - **Config validation on startup** - missing or empty config keys are reported immediately.
 - **Ready-to-deploy script generation** - the exported `.ps1` follows the company scripting template.
 - **Fully embedded JSON** - the generated deployment script contains the JSON as a literal string.
 - **Session log with retention** - older logs are cleaned up automatically.
+- **Fallback diagnostics log** - a plain-text LocalAppData log is kept even without the optional output module.
 - **MIT licensed usage model** - broad reuse and adaptation are allowed with minimal obligations.
 
 ---
@@ -420,37 +490,12 @@ Log files older than `LogRetentionDays` are deleted automatically on the next st
 ## Weak points
 
 - **No drag-and-drop reordering** - items can only be moved one step at a time with the Up and Down buttons.
-- **No undo / redo** - deleting or editing an item cannot be reversed without reloading the last saved file.
 - **No multi-select** - only one item can be selected, moved, or deleted at a time.
-- **No URL validation** - any string is accepted as a URL.
+- **Recovery is single-snapshot** - only the latest state is retained; there is no multi-version recovery history.
 - **Flat file picker for Load** - the standard Windows file picker is still used.
 - **Script version in generated output is static** - there is no automatic increment mechanism.
 - **Admin rights required for registry features** - reading from and writing to `HKLM:\SOFTWARE\Policies` requires elevation.
 - **No uninstall / removal script** - no companion script is generated to remove the registry keys.
-
----
-
-## Next to-do's
-
-### Compare Chrome vs Edge registry values
-
-**Goal:** When the admin clicks **Read** in the Registry tab, optionally compare the
-`ManagedBookmarks` and `ManagedFavorites` values side by side and highlight differences.
-
-### Undo / redo support
-
-**Goal:** Keep a history stack of bookmark-tree states so the user can step backwards after
-an accidental delete or edit without reloading from a file.
-
-### Export remove script
-
-**Goal:** Add a companion **Export Remove Script** button that generates a `.ps1` which
-removes the managed bookmarks policy values when the policy is revoked.
-
-### Create GPO helper
-
-**Goal:** Add optional guidance or export support for packaging the generated output into a
-Group Policy workflow.
 
 ---
 

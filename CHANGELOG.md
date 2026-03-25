@@ -1,6 +1,72 @@
 ﻿# Changelog
 
-## Unreleased
+## 2.11.2.0
+
+### Generated deployment script transcript robustness
+
+- Fixed generated script behavior when no transcript is active: `Stop-Transcript` calls are now wrapped in safe `try/catch` blocks.
+- Prevents runtime noise such as: _"Stop-Transcript : ... The host is not currently transcribing."_
+- Applies to the pre-start cleanup path, the non-admin early-exit path, and the normal script-finish path.
+
+#### Operational note
+
+- This fix affects **newly exported** deployment scripts.
+- Existing exported `.ps1` files keep their original behavior and should be regenerated from the GUI to include this safeguard.
+
+#### User-visible impact
+
+- Exported scripts no longer print the transcript-stop warning when no transcript session is currently active.
+- Transcript start/stop behavior remains unchanged for normal successful runs.
+
+## 2.11.1.0
+
+### Packaged EXE startup fix
+
+- Fixed WinForms startup crash in packaged `.exe` runs: `SetUnhandledExceptionMode` is now configured early (before controls are created), avoiding the runtime error _"Thread exception mode cannot be changed once any Controls are created on the thread."_
+- Hardened error monitoring startup by making late unhandled-exception mode configuration best-effort and non-fatal.
+
+## 2.11.0.0
+
+### Extended error logging and fallback diagnostics
+
+- Added a plain-text fallback session log in LocalAppData so diagnostics are still persisted when the optional output module is unavailable.
+- Added periodic runtime error scanning of PowerShell's global `$Error` buffer so non-UI runtime errors are captured in the session log.
+- Added WinForms UI-thread and AppDomain unhandled-exception hooks so unexpected crashes are written to the log with full exception details.
+- Added deduplication for explicitly handled errors to avoid logging the same `ErrorRecord` twice.
+
+## 2.10.0.0
+
+### Autosave and session recovery (point 6)
+
+- Implemented file-based autosave and crash recovery using a per-user recovery folder in LocalAppData.
+- Added recovery artifacts:
+  - `latest.state.json` for persisted editor snapshots
+  - `session.lock` as crash marker (created on start, removed on clean close)
+- Added debounced autosave timer (`15s`) that writes snapshots only when editor state is dirty.
+- Added startup recovery prompt when an unclean previous session is detected.
+- Added safe recovery restore flow with schema-aware payload wrapper (`schema_version`, timestamp, reason, editor state).
+- Added clean shutdown recovery finalization (final snapshot + lock-file cleanup).
+
+### Educational code comments (English)
+
+- Added extensive in-code English comments for learning purposes around autosave/recovery architecture, lifecycle hooks, and design decisions.
+- Documented key concepts (dirty tracking, lock-file semantics, debounce strategy, optional-failure behavior) directly where the logic executes.
+
+### Documentation synchronization
+
+- Updated `USERMANUAL.md` to reflect current functionality and button set.
+- Normalized changelog structure so all top-level sections use explicit version numbers.
+
+### Quality, validation and editor reliability improvements
+
+- Added central validation helpers for URL checks (`http`/`https` only), safe file-base names, and user-friendly error extraction.
+- Added CLIXML-to-readable error conversion for UI dialogs while keeping raw error details in log entries.
+- Added undo/redo state management for editor changes (add/edit/delete/move/import/load operations).
+- Added toolbar actions for **Undo**, **Redo**, and a **Validate** contract test.
+- Added a JSON roundtrip contract test (`Build-Json -> Import-JsonString -> Build-Json`) to detect import/export drift.
+- Replaced generated-script OS detection from `Get-WmiObject` to `Get-CimInstance`.
+- Hardened script-name handling via centralized safe base-name conversion.
+- Resolved `PSAvoidAssignmentToAutomaticVariable` by renaming the cue-banner handler parameter from `$sender` to `$_sender`.
 
 ### Executable packaging and startup compatibility
 

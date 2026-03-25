@@ -26,8 +26,8 @@
         Licensed under the MIT License; see LICENSE in this folder.
 #>
 
-$GLB_scriptVersion     = "2.9.1.0"
-$GLB_ScriptUpdateDate  = "19/03/2026"
+$GLB_scriptVersion     = "2.11.3.0"
+$GLB_ScriptUpdateDate  = "25/03/2026"
 $GLB_scriptcontributer = "Decoster Hans"
 $GLB_ScriptTitel       = "Managed Bookmarks Creator"
 
@@ -38,7 +38,71 @@ Add-Type -AssemblyName System.Drawing
 
 function Test-HasText {
     param([string]$Value)
+    # Central null/empty/whitespace check used throughout the script to keep
+    # guard clauses short and consistent.
     return -not [string]::IsNullOrWhiteSpace($Value)
+}
+
+function ConvertTo-FriendlyErrorMessage {
+    param([string]$RawMessage)
+
+    # Some PowerShell/UI failures arrive as CLIXML payloads instead of plain
+    # text. This helper extracts the readable error lines for message boxes.
+
+    if (-not (Test-HasText $RawMessage)) { return 'Unknown error.' }
+
+    $msg = $RawMessage
+    if ($msg -match '^#<\s*CLIXML') {
+        $errors = [System.Text.RegularExpressions.Regex]::Matches($msg, '<S\s+S="Error">(.*?)</S>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        if ($errors.Count -gt 0) {
+            $parts = @()
+            foreach ($m in $errors) {
+                $part = $m.Groups[1].Value
+                $part = $part -replace '_x000D__x000A_', [System.Environment]::NewLine
+                $part = $part.Trim()
+                if (Test-HasText $part) { $parts += $part }
+            }
+            if ($parts.Count -gt 0) {
+                return ($parts -join [System.Environment]::NewLine)
+            }
+        }
+    }
+
+    return $msg.Trim()
+}
+
+function Test-IsValidHttpUrl {
+    param([string]$Url)
+    # Managed bookmarks should contain absolute web URLs only; reject custom
+    # schemes and malformed strings early in the dialog.
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$uri)) { return $false }
+    return $uri.Scheme -in @('http', 'https')
+}
+
+function ConvertTo-SafeFileBaseName {
+    param([string]$InputName)
+
+    # Normalize free-form user input into a Windows-safe file base name so the
+    # generated JSON/script names do not fail on invalid path characters.
+
+    if (-not (Test-HasText $InputName)) { return '' }
+
+    $name = $InputName.Trim() -replace '\s+', '_'
+    $name = $name -replace '[\\/:*?"<>|]', ''
+    $name = $name -replace '[^A-Za-z0-9_.-]', ''
+    $name = $name.Trim('. ')
+
+    $reserved = @('CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9')
+    if ($reserved -contains $name.ToUpperInvariant()) {
+        $name = "${name}_file"
+    }
+
+    if ($name.Length -gt 120) {
+        $name = $name.Substring(0, 120).Trim('. ')
+    }
+
+    return $name
 }
 
 $script:isPackagedExecutable = $false
@@ -57,11 +121,16 @@ function Write-AppHostMessage {
         [string]$Color = 'Gray'
     )
 
+    # Avoid console chatter when the script is packaged as a GUI executable.
+    # During normal .ps1 runs, information messages remain useful for startup diagnostics.
     if ($script:isPackagedExecutable) { return }
-    Write-Host $Message -ForegroundColor $Color
+    Write-Information "[$Color] $Message" -InformationAction Continue
 }
 
 function Get-AppSearchRoots {
+    # Build an ordered list of directories where assets may live. This allows
+    # the same script to find config/module files whether it runs as source,
+    # from a packaged executable, or from a different working directory.
     $roots = [System.Collections.Generic.List[string]]::new()
     foreach ($candidate in @(
             $PSScriptRoot,
@@ -81,6 +150,8 @@ function Resolve-AppAssetPath {
         [string[]]$RelativeCandidates
     )
 
+    # Try each candidate relative path against each approved root and return
+    # the first real file that exists.
     foreach ($root in (Get-AppSearchRoots)) {
         foreach ($relativePath in $RelativeCandidates) {
             if (-not (Test-HasText $relativePath)) { continue }
@@ -167,11 +238,174 @@ if ($null -ne $GLB_config -and $script:outputModuleLoaded) {
 $logListBox  = New-Object System.Windows.Forms.ListBox
 $GLB_logPath = $null
 
+$fallbackLogRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Decoster.tech\ManagedBookmarksCreator\Logs'
+$fallbackLogName = '{0}_{1}_ManagedBookmarksCreator.log' -f $env:USERNAME, (Get-Date -Format 'yyyyMMdd_HHmmss')
+$script:fallbackLogPath = Join-Path $fallbackLogRoot $fallbackLogName
+
 if ($script:outputModuleLoaded -and $GLB_config -and $GLB_config.Logging.BasePath) {
     $GLB_logPath = Join-Path $GLB_config.Logging.BasePath "ManagedBookmarksCreator"
     Remove-DecosterOutputOldLogs -LogPath $GLB_logPath -RetentionDays $GLB_config.Logging.LogRetentionDays
 }
 #endregion
+
+function Add-FallbackLogLine {
+    param(
+        [string]$Text         = '',
+        [string]$State        = 'info',
+        [string]$Detail       = '',
+        [string]$ErrorMessage = ''
+    )
+
+    if (-not (Test-HasText $script:fallbackLogPath)) { return }
+
+    try {
+        $directory = Split-Path -Parent $script:fallbackLogPath
+        if ((Test-HasText $directory) -and -not (Test-Path -LiteralPath $directory)) {
+            New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        $parts = [System.Collections.Generic.List[string]]::new()
+        if (Test-HasText $Text)         { $parts.Add($Text) | Out-Null }
+        if (Test-HasText $Detail)       { $parts.Add("Detail: $Detail") | Out-Null }
+        if (Test-HasText $ErrorMessage) { $parts.Add("Error: $ErrorMessage") | Out-Null }
+        if ($parts.Count -eq 0) { $parts.Add('') | Out-Null }
+
+        $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $State.ToUpperInvariant(), ($parts -join ' | ')
+        Add-Content -LiteralPath $script:fallbackLogPath -Value $line -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        # Do not let diagnostics logging interrupt the main GUI flow.
+    }
+}
+
+function Mark-ErrorRecordSeen {
+    param($Record)
+
+    if ($null -eq $Record) { return }
+
+    try {
+        $recordId = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Record)
+        $null = $script:seenErrorRecordIds.Add($recordId)
+    }
+    catch {
+        # Best-effort deduplication only.
+    }
+}
+
+function ConvertTo-ErrorRecordLogMessage {
+    param([System.Management.Automation.ErrorRecord]$Record)
+
+    if ($null -eq $Record) { return 'Unknown PowerShell error.' }
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $friendly = ConvertTo-FriendlyErrorMessage $Record.Exception.Message
+    if (Test-HasText $friendly) { $parts.Add($friendly) | Out-Null }
+
+    if ($null -ne $Record.CategoryInfo -and (Test-HasText ([string]$Record.CategoryInfo.Category))) {
+        $parts.Add("Category: $($Record.CategoryInfo.Category)") | Out-Null
+    }
+    if ($null -ne $Record.InvocationInfo -and (Test-HasText $Record.InvocationInfo.MyCommand.Name)) {
+        $parts.Add("Command: $($Record.InvocationInfo.MyCommand.Name)") | Out-Null
+    }
+    if ($null -ne $Record.TargetObject -and (Test-HasText ([string]$Record.TargetObject))) {
+        $parts.Add("Target: $($Record.TargetObject)") | Out-Null
+    }
+    if ($null -ne $Record.InvocationInfo -and (Test-HasText $Record.InvocationInfo.PositionMessage)) {
+        $position = ($Record.InvocationInfo.PositionMessage -replace '\r?\n', ' | ').Trim()
+        if (Test-HasText $position) {
+            $parts.Add("Position: $position") | Out-Null
+        }
+    }
+
+    return ($parts -join ' || ')
+}
+
+function Sync-GlobalErrorLog {
+    $records = @($global:Error)
+    if ($records.Count -eq 0) { return }
+
+    [array]::Reverse($records)
+    foreach ($record in $records) {
+        if ($null -eq $record) { continue }
+
+        try {
+            $recordId = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($record)
+        }
+        catch {
+            continue
+        }
+
+        if (-not $script:seenErrorRecordIds.Add($recordId)) { continue }
+        Add-LogEntry 'PowerShell runtime error' 'fail' -ErrorMessage (ConvertTo-ErrorRecordLogMessage $record)
+    }
+}
+
+function Start-ErrorMonitoring {
+    foreach ($existingError in @($global:Error)) {
+        Mark-ErrorRecordSeen $existingError
+    }
+
+    if ($null -eq $script:errorMonitorTimer) {
+        $script:errorMonitorTimer = New-Object System.Windows.Forms.Timer
+        $script:errorMonitorTimer.Interval = 1000
+        $script:errorMonitorTimer.Add_Tick({ Sync-GlobalErrorLog })
+    }
+    $script:errorMonitorTimer.Start()
+
+    if ($null -eq $script:threadExceptionHandler) {
+        # Do not call SetUnhandledExceptionMode here. In packaged hosts this can emit
+        # a MethodInvocation error popup even when wrapped, depending on host behavior.
+        # We still attach thread/appdomain exception handlers for best-effort diagnostics.
+        $script:threadExceptionHandler = [System.Threading.ThreadExceptionEventHandler]{
+            param($_sender, $eventArgs)
+
+            if ($null -eq $eventArgs -or $null -eq $eventArgs.Exception) { return }
+
+            Add-LogEntry 'Unhandled UI exception' 'fail' -ErrorMessage $eventArgs.Exception.ToString()
+            if ($null -ne $actionLabel) {
+                Set-StatusLabel $actionLabel 'Unhandled UI exception logged. Check the session log for details.' 'fail'
+            }
+        }
+        [System.Windows.Forms.Application]::add_ThreadException($script:threadExceptionHandler)
+    }
+
+    if ($null -eq $script:unhandledExceptionHandler) {
+        $script:unhandledExceptionHandler = [System.UnhandledExceptionEventHandler]{
+            param($_sender, $eventArgs)
+
+            $exceptionText = if ($null -ne $eventArgs -and $eventArgs.ExceptionObject -is [System.Exception]) {
+                $eventArgs.ExceptionObject.ToString()
+            }
+            elseif ($null -ne $eventArgs) {
+                [string]$eventArgs.ExceptionObject
+            }
+            else {
+                'Unknown unhandled application exception.'
+            }
+
+            Add-LogEntry 'Unhandled application exception' 'fail' -ErrorMessage $exceptionText
+        }
+        [AppDomain]::CurrentDomain.add_UnhandledException($script:unhandledExceptionHandler)
+    }
+}
+
+function Stop-ErrorMonitoring {
+    if ($null -ne $script:errorMonitorTimer) {
+        $script:errorMonitorTimer.Stop()
+        $script:errorMonitorTimer.Dispose()
+        $script:errorMonitorTimer = $null
+    }
+
+    if ($null -ne $script:threadExceptionHandler) {
+        [System.Windows.Forms.Application]::remove_ThreadException($script:threadExceptionHandler)
+        $script:threadExceptionHandler = $null
+    }
+
+    if ($null -ne $script:unhandledExceptionHandler) {
+        [AppDomain]::CurrentDomain.remove_UnhandledException($script:unhandledExceptionHandler)
+        $script:unhandledExceptionHandler = $null
+    }
+}
 
 function Add-LogEntry {
     <#
@@ -197,6 +431,7 @@ function Add-LogEntry {
         [string]$Detail       = '',
         [string]$ErrorMessage = ''
     )
+    Add-FallbackLogLine -Text $Text -State $State -Detail $Detail -ErrorMessage $ErrorMessage
     if (-not $script:outputModuleLoaded) { return }
     try {
         $lines = switch ($State) {
@@ -217,7 +452,9 @@ function Add-LogEntry {
         }
     }
     catch {
+        Mark-ErrorRecordSeen $_
         Write-AppHostMessage "[Log] $State : $Text $(if($Detail){"| $Detail"}) — $($_.Exception.Message)" "DarkYellow"
+        Add-FallbackLogLine -Text 'Fallback logger pipeline error' -State 'warn' -Detail $Text -ErrorMessage $_.Exception.Message
     }
 }
 
@@ -263,18 +500,59 @@ $fontMono = New-Object System.Drawing.Font("Consolas", 8)
 # Folder : @{ type="folder"; name="..."; children=List[object] }
 # Link   : @{ type="url";    name="..."; url="..."             }
 $script:bookmarks = [System.Collections.Generic.List[object]]::new()
+$script:undoStack = [System.Collections.Generic.List[string]]::new()
+$script:redoStack = [System.Collections.Generic.List[string]]::new()
+
+# -----------------------------------------------------------------------------
+# Autosave / Session-Recovery runtime state
+# -----------------------------------------------------------------------------
+# The recovery system is intentionally file-based so it still works when the
+# PowerShell host is terminated unexpectedly. We persist a compact editor-state
+# JSON snapshot and use a lock file as a crash indicator.
+#
+# Key concepts:
+#   1) latest.state.json  -> the most recent editor snapshot
+#   2) session.lock       -> created while app is running; removed on clean exit
+#   3) dirty flag         -> saves only when state changed (debounced writes)
+#
+# This design keeps IO low during normal editing and maximizes recoverability
+# after a crash/kill/restart.
+$script:recoveryRootPath          = $null
+$script:recoveryStateFilePath     = $null
+$script:recoveryLockFilePath      = $null
+$script:recoveryActive            = $false
+$script:autosaveIsDirty           = $false
+$script:isRestoringEditorState    = $false
+$script:autosaveTimer             = $null
+$script:autosaveIntervalMs        = 15000
+
+# Runtime diagnostics state.
+# - fallback log path keeps a plain-text audit trail even when the optional
+#   output module is unavailable.
+# - seen error ids prevent the periodic $Error scan from logging the same
+#   ErrorRecord object multiple times.
+$script:fallbackLogPath           = $null
+$script:seenErrorRecordIds        = [System.Collections.Generic.HashSet[int]]::new()
+$script:errorMonitorTimer         = $null
+$script:threadExceptionHandler    = $null
+$script:unhandledExceptionHandler = $null
 #endregion
 
 #region ── Data helpers ──────────────────────────────────────────────────────
 function New-FolderNode($name) {
+    # Data-model constructor for folder items. The TreeView stores these hashtables
+    # in Node.Tag so UI operations and JSON serialization work on the same object.
     return @{ type = "folder"; name = $name; children = [System.Collections.Generic.List[object]]::new() }
 }
 
 function New-UrlNode($name, $url) {
+    # Data-model constructor for bookmark link items.
     return @{ type = "url"; name = $name; url = $url }
 }
 
 function ConvertTo-NodeObject($node) {
+    # Convert the internal hashtable/tree model into plain PSCustomObjects that
+    # serialize cleanly to JSON without leaking WinForms-specific state.
     if ($node.type -eq "folder") {
         return [PSCustomObject]@{
             name     = $node.name
@@ -285,6 +563,8 @@ function ConvertTo-NodeObject($node) {
 }
 
 function Build-Json {
+    # Build the final policy payload. The optional toplevel_name entry must be
+    # the first array element because Edge expects that specific structure.
     $bookmarkObjects = @($script:bookmarks | ForEach-Object { ConvertTo-NodeObject $_ })
     $name = if ($null -ne $script:txtTopLevelName) { $script:txtTopLevelName.Text.Trim() } else { '' }
     if ($name -ne '') {
@@ -293,6 +573,100 @@ function Build-Json {
         $all = $bookmarkObjects
     }
     return (ConvertTo-Json -InputObject $all -Compress -Depth 20)
+}
+
+function Get-EditorStateJson {
+    # Capture the full editor state in one compact payload so undo/redo and
+    # session recovery can restore both the tree and the bar label together.
+    $topName = if ($null -ne $script:txtTopLevelName) { $script:txtTopLevelName.Text } else { '' }
+    $state = [PSCustomObject]@{
+        toplevel_name = $topName
+        bookmarks     = @($script:bookmarks | ForEach-Object { ConvertTo-NodeObject $_ })
+    }
+    return ($state | ConvertTo-Json -Compress -Depth 25)
+}
+
+function Restore-EditorStateJson {
+    param([string]$StateJson)
+
+    # Rebuild the editor from a saved snapshot. The restore flag prevents the
+    # recovery/undo plumbing from treating programmatic changes as user edits.
+    try {
+        $script:isRestoringEditorState = $true
+
+        $state = $StateJson | ConvertFrom-Json
+        $script:bookmarks.Clear()
+        $script:tree.Nodes.Clear()
+
+        if ($null -ne $script:txtTopLevelName) {
+            $script:txtTopLevelName.Text = [string]$state.toplevel_name
+        }
+
+        foreach ($item in @($state.bookmarks)) {
+            $node = Import-Node $item
+            if ($null -ne $node) {
+                $script:bookmarks.Add($node) | Out-Null
+            }
+        }
+
+        Update-Tree
+        Update-Preview
+    }
+    finally {
+        $script:isRestoringEditorState = $false
+    }
+}
+
+function Push-UndoState {
+    # Save the current state before a mutating action. Redo history is cleared
+    # because a new edit creates a new branch of history.
+    $script:undoStack.Add((Get-EditorStateJson)) | Out-Null
+    if ($script:undoStack.Count -gt 100) {
+        $script:undoStack.RemoveAt(0)
+    }
+    $script:redoStack.Clear()
+    if (-not $script:isRestoringEditorState) {
+        $script:autosaveIsDirty = $true
+    }
+}
+
+function Invoke-Undo {
+    # Undo swaps the current state into redo and restores the latest undo snapshot.
+    if ($script:undoStack.Count -eq 0) { return $false }
+    $script:redoStack.Add((Get-EditorStateJson)) | Out-Null
+    $last = $script:undoStack[$script:undoStack.Count - 1]
+    $script:undoStack.RemoveAt($script:undoStack.Count - 1)
+    Restore-EditorStateJson $last
+    return $true
+}
+
+function Invoke-Redo {
+    # Redo mirrors undo: move current state back to undo, then restore the most
+    # recently undone snapshot.
+    if ($script:redoStack.Count -eq 0) { return $false }
+    $script:undoStack.Add((Get-EditorStateJson)) | Out-Null
+    $next = $script:redoStack[$script:redoStack.Count - 1]
+    $script:redoStack.RemoveAt($script:redoStack.Count - 1)
+    Restore-EditorStateJson $next
+    return $true
+}
+
+function Test-JsonRoundtripContract {
+    # Safety test: export the current state to JSON, import it again, then verify
+    # the normalized JSON is unchanged. This catches drift between build/import logic.
+    $snapshot = Get-EditorStateJson
+    try {
+        $before = Build-Json
+        Import-JsonString $before
+        $after = Build-Json
+
+        $beforeNorm = (($before | ConvertFrom-Json) | ConvertTo-Json -Compress -Depth 25)
+        $afterNorm  = (($after  | ConvertFrom-Json) | ConvertTo-Json -Compress -Depth 25)
+        return ($beforeNorm -eq $afterNorm)
+    }
+    finally {
+        Restore-EditorStateJson $snapshot
+    }
 }
 
 function Import-Node($jsonNode) {
@@ -369,6 +743,8 @@ function Import-JsonString($raw) {
 
 #region ── TreeView helpers ──────────────────────────────────────────────────
 function Add-TreeNode($parentTvNode, $dataNode) {
+    # Create the visible TreeView node and keep a reference to the underlying
+    # data object in Tag so later UI actions can mutate the real model directly.
     $tv = New-Object System.Windows.Forms.TreeNode
     $tv.Tag = $dataNode
     Update-TreeNodeText $tv
@@ -381,6 +757,8 @@ function Add-TreeNode($parentTvNode, $dataNode) {
 }
 
 function Update-TreeNodeText($tvNode) {
+    # Visual formatting is derived from the data type so folder/link styling
+    # always stays in sync after edits.
     $d = $tvNode.Tag
     if ($d.type -eq "folder") {
         $tvNode.Text      = "[Folder] $($d.name)"
@@ -394,6 +772,8 @@ function Update-TreeNodeText($tvNode) {
 }
 
 function Update-Tree {
+    # Full tree rebuild from the in-memory model. This is simpler and safer than
+    # trying to patch every UI branch manually after complex operations.
     $script:tree.Nodes.Clear()
     foreach ($node in $script:bookmarks) {
         $tv = Add-TreeNode $null $node
@@ -403,6 +783,7 @@ function Update-Tree {
 }
 
 function Add-ChildrenToTree($tvParent, $dataParent) {
+    # Recursive renderer for nested folders.
     foreach ($child in $dataParent.children) {
         $tv = Add-TreeNode $tvParent $child
         if ($child.type -eq "folder") { Add-ChildrenToTree $tv $child }
@@ -410,6 +791,8 @@ function Add-ChildrenToTree($tvParent, $dataParent) {
 }
 
 function Find-ParentList($dataNode, [ref]$outList, [ref]$outParent) {
+    # Find which collection currently owns a node. This is needed for delete and
+    # move operations because nodes can live either at root level or inside folders.
     foreach ($n in $script:bookmarks) {
         if ($n -eq $dataNode) { $outList.Value = $script:bookmarks; $outParent.Value = $null; return $true }
         if ($n.type -eq "folder" -and (Search-Children $n $dataNode $outList $outParent)) { return $true }
@@ -418,6 +801,7 @@ function Find-ParentList($dataNode, [ref]$outList, [ref]$outParent) {
 }
 
 function Search-Children($folder, $target, [ref]$outList, [ref]$outParent) {
+    # Depth-first search through nested folder children until the target item is found.
     foreach ($c in $folder.children) {
         if ($c -eq $target) { $outList.Value = $folder.children; $outParent.Value = $folder; return $true }
         if ($c.type -eq "folder" -and (Search-Children $c $target $outList $outParent)) { return $true }
@@ -426,6 +810,8 @@ function Search-Children($folder, $target, [ref]$outList, [ref]$outParent) {
 }
 
 function Select-ByData($tvNode, $data) {
+    # After rebuilding the tree, reselect the node that still points to the same
+    # underlying data object so keyboard/move workflows feel continuous.
     if ($tvNode.Tag -eq $data) { $script:tree.SelectedNode = $tvNode; return }
     foreach ($child in $tvNode.Nodes) { Select-ByData $child $data }
 }
@@ -513,7 +899,7 @@ function New-ManagedBookmarksScript {
     $lines.Add('    New-Item -Path $transcriptPath -ItemType Directory -Force | Out-Null')
     $lines.Add('}')
     $lines.Add('')
-    $lines.Add('Stop-Transcript | Out-Null')
+    $lines.Add('try { Stop-Transcript -ErrorAction Stop | Out-Null } catch { }')
     $lines.Add('Start-Transcript -Path "$transcriptPath$transcriptName" -Append')
     $lines.Add('')
     $lines.Add('# ---------------------------------------------------------------------------')
@@ -521,12 +907,12 @@ function New-ManagedBookmarksScript {
     $lines.Add('# ---------------------------------------------------------------------------')
     $lines.Add('if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")) {')
     $lines.Add('    Write-Host "Not running as Administrator. Please restart with admin privileges." -ForegroundColor Red')
-    $lines.Add('    Stop-Transcript')
+    $lines.Add('    try { Stop-Transcript -ErrorAction Stop | Out-Null } catch { }')
     $lines.Add('    exit 1')
     $lines.Add('}')
     $lines.Add('')
     $lines.Add('# Get OS')
-    $lines.Add('$os = (Get-WmiObject -Class Win32_OperatingSystem).Caption')
+    $lines.Add('$os = (Get-CimInstance -ClassName Win32_OperatingSystem).Caption')
     $lines.Add('Write-Host (Get-Date -Format "yyyyMMdd HH:mm:ss") "- OS: $os" -ForegroundColor Green')
     $lines.Add('')
     $lines.Add('# ---------------------------------------------------------------------------')
@@ -572,7 +958,7 @@ function New-ManagedBookmarksScript {
     $lines.Add('New-ItemProperty -Path $registryPath -Name $EndDay -Value $endDayValue -PropertyType String -Force | Out-Null')
     $lines.Add('Write-Host (Get-Date -Format "yyyyMMdd HH:mm:ss") "- Script completed." -ForegroundColor Green')
     $lines.Add('')
-    $lines.Add('Stop-Transcript')
+    $lines.Add('try { Stop-Transcript -ErrorAction Stop | Out-Null } catch { }')
 
     return $lines -join $nl
 }
@@ -585,6 +971,7 @@ function New-StyledButton {
         [System.Drawing.Color]$Back, [System.Drawing.Color]$Fore,
         [System.Drawing.Font]$Font = $null
     )
+    # Small UI factory to keep button styling consistent across dialogs.
     $btn           = New-Object System.Windows.Forms.Button
     $btn.Text      = $Text
     $btn.Location  = New-Object System.Drawing.Point($X, $Y)
@@ -601,6 +988,8 @@ function New-StyledButton {
 
 function New-StyledDialog {
     param([string]$Title, [int]$W, [int]$H)
+    # Shared modal-dialog shell so every custom prompt inherits the same size,
+    # theme, and startup behavior.
     $dlg                 = New-Object System.Windows.Forms.Form
     $dlg.Text            = $Title
     $dlg.Size            = New-Object System.Drawing.Size($W, $H)
@@ -614,6 +1003,7 @@ function New-StyledDialog {
 
 function New-StyledTextBox {
     param([int]$X, [int]$Y, [int]$W, [string]$DefaultText = "")
+    # Shared textbox factory for consistent colors, borders, and fonts.
     $tb              = New-Object System.Windows.Forms.TextBox
     $tb.Location     = New-Object System.Drawing.Point($X, $Y)
     $tb.Size         = New-Object System.Drawing.Size($W, 26)
@@ -631,6 +1021,8 @@ function Set-TextBoxPlaceholder {
         [string]$Placeholder = ''
     )
 
+    # Newer .NET/PowerShell environments expose PlaceholderText directly. Older
+    # WinForms versions need the Win32 cue-banner message instead.
     if ($TextBox.PSObject.Properties.Name -contains 'PlaceholderText') {
         $TextBox.PlaceholderText = $Placeholder
         return
@@ -640,9 +1032,9 @@ function Set-TextBoxPlaceholder {
 
     $TextBox.AccessibleDescription = $Placeholder
     $applyCueBanner = {
-        param($sender, $e)
-        if ($sender.IsHandleCreated) {
-            [void][Win32CueBanner]::SendMessage($sender.Handle, 0x1501, [IntPtr]1, [string]$sender.AccessibleDescription)
+        param($_sender, $_e)
+        if ($_sender.IsHandleCreated) {
+            [void][Win32CueBanner]::SendMessage($_sender.Handle, 0x1501, [IntPtr]1, [string]$_sender.AccessibleDescription)
         }
     }
 
@@ -655,6 +1047,7 @@ function Set-TextBoxPlaceholder {
 
 function New-DialogLabel {
     param([string]$Text, [int]$X, [int]$Y)
+    # Lightweight label factory used by the custom dialogs.
     $lbl           = New-Object System.Windows.Forms.Label
     $lbl.Text      = $Text
     $lbl.Location  = New-Object System.Drawing.Point($X, $Y)
@@ -687,10 +1080,141 @@ function Set-StatusLabel {
 }
 
 function Update-Preview { $txtJson.Text = Build-Json }
+
+# -----------------------------------------------------------------------------
+# Autosave + Session-Recovery helpers
+# -----------------------------------------------------------------------------
+# These functions intentionally sit close to UI/status helpers because they are
+# UI-aware (status messages, prompts) and editor-state aware (Build/Restore).
+
+function Initialize-RecoveryStorage {
+    # Choose a stable per-user path that works with both .ps1 and packaged .exe.
+    $baseLocalAppData = [Environment]::GetFolderPath('LocalApplicationData')
+    $script:recoveryRootPath      = Join-Path $baseLocalAppData 'Decoster.tech\ManagedBookmarksCreator\Recovery'
+    $script:recoveryStateFilePath = Join-Path $script:recoveryRootPath 'latest.state.json'
+    $script:recoveryLockFilePath  = Join-Path $script:recoveryRootPath 'session.lock'
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:recoveryRootPath)) {
+            New-Item -ItemType Directory -Path $script:recoveryRootPath -Force -ErrorAction Stop | Out-Null
+        }
+        $script:recoveryActive = $true
+        Write-AppHostMessage "Recovery storage initialized: $($script:recoveryRootPath)" 'Cyan'
+    }
+    catch {
+        Mark-ErrorRecordSeen $_
+        # Recovery is optional; the editor must keep working even if path setup fails.
+        $script:recoveryActive = $false
+        Write-AppHostMessage "Recovery disabled (path init failed): $($_.Exception.Message)" 'Yellow'
+        Add-LogEntry 'Recovery storage initialization failed' 'warn' -ErrorMessage $_.Exception.Message
+    }
+}
+
+function Save-RecoverySnapshot {
+    param([string]$Reason = 'autosave')
+
+    if (-not $script:recoveryActive) { return $false }
+
+    try {
+        # Wrap state with metadata so future schema changes stay manageable.
+        $payload = [PSCustomObject]@{
+            schema_version = 1
+            saved_at       = (Get-Date).ToString('o')
+            reason         = $Reason
+            editor_state   = (Get-EditorStateJson)
+        }
+
+        $json = $payload | ConvertTo-Json -Compress -Depth 10
+        Set-Content -LiteralPath $script:recoveryStateFilePath -Value $json -Encoding UTF8 -ErrorAction Stop
+        $script:autosaveIsDirty = $false
+        return $true
+    }
+    catch {
+        Mark-ErrorRecordSeen $_
+        Write-AppHostMessage "Recovery save failed: $($_.Exception.Message)" 'Yellow'
+        Add-LogEntry 'Recovery snapshot save failed' 'warn' -ErrorMessage $_.Exception.Message
+        return $false
+    }
+}
+
+function Try-RestoreRecoverySnapshot {
+    if (-not $script:recoveryActive) { return $false }
+    if (-not (Test-Path -LiteralPath $script:recoveryStateFilePath)) { return $false }
+
+    # Recovery is offered when a previous lock file still exists. That indicates
+    # the prior session likely ended unexpectedly.
+    if (-not (Test-Path -LiteralPath $script:recoveryLockFilePath)) { return $false }
+
+    $choice = [System.Windows.Forms.MessageBox]::Show(
+        "An unfinished previous session was detected. Do you want to restore the last autosaved state?",
+        "Session recovery",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+
+    if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+
+    try {
+        $payload = Get-Content -LiteralPath $script:recoveryStateFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $payload.editor_state) {
+            throw 'Recovery payload does not contain editor_state.'
+        }
+        Restore-EditorStateJson $payload.editor_state
+        $script:autosaveIsDirty = $false
+        Add-LogEntry 'Recovered previous session from autosave.' 'ok'
+        Set-StatusLabel -Label $actionLabel -Text 'Recovered previous session from autosave.' -State 'ok'
+        return $true
+    }
+    catch {
+        Mark-ErrorRecordSeen $_
+        Add-LogEntry 'Recovery load failed' 'fail' -ErrorMessage $_.Exception.Message
+        $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show("Could not restore autosave:`n$friendly", "Recovery error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return $false
+    }
+}
+
+function Start-RecoverySession {
+    if (-not $script:recoveryActive) { return }
+
+    # Touch the lock file. If this process exits cleanly, we remove it again.
+    # If not, next startup sees the lock and offers recovery.
+    $lockInfo = "started=$(Get-Date -Format o); pid=$PID"
+    Set-Content -LiteralPath $script:recoveryLockFilePath -Value $lockInfo -Encoding UTF8 -ErrorAction SilentlyContinue
+
+    $script:autosaveTimer = New-Object System.Windows.Forms.Timer
+    $script:autosaveTimer.Interval = $script:autosaveIntervalMs
+    $script:autosaveTimer.Add_Tick({
+        if ($script:autosaveIsDirty -and -not $script:isRestoringEditorState) {
+            Save-RecoverySnapshot -Reason 'autosave-timer' | Out-Null
+        }
+    })
+    $script:autosaveTimer.Start()
+}
+
+function Stop-RecoverySession {
+    # Final autosave on clean shutdown, then remove lock marker.
+    if ($script:recoveryActive) {
+        Save-RecoverySnapshot -Reason 'clean-exit' | Out-Null
+        if (Test-Path -LiteralPath $script:recoveryLockFilePath) {
+            Remove-Item -LiteralPath $script:recoveryLockFilePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($null -ne $script:autosaveTimer) {
+        $script:autosaveTimer.Stop()
+        $script:autosaveTimer.Dispose()
+        $script:autosaveTimer = $null
+    }
+}
 #endregion
 
 #region ── Dialogs ───────────────────────────────────────────────────────────
 function Show-FolderDialog($title, $defaultName = "") {
+    # Reused for both create and edit folder actions. Returns trimmed text or null
+    # when the user cancels the dialog.
     $dlg = New-StyledDialog $title 360 150
     $dlg.Controls.AddRange(@(
         (New-DialogLabel "Folder name:" 10 14),
@@ -710,6 +1234,8 @@ function Show-FolderDialog($title, $defaultName = "") {
 }
 
 function Show-SaveNameDialog($savePath) {
+    # Custom lightweight save dialog used when JsonBasePath is configured and we
+    # only need a file name, not a full folder browser.
     $dlg = New-StyledDialog "File Name" 400 160
     $dlg.Controls.AddRange(@(
         (New-DialogLabel "Save in: $savePath" 10 12),
@@ -739,6 +1265,7 @@ function Show-SaveFileDialog {
         [string]$InitialDirectory = ""
     )
 
+    # Fallback to the standard Windows dialog when no managed default path is available.
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
     $dlg.Title = $Title
     $dlg.Filter = $Filter
@@ -755,6 +1282,8 @@ function Show-SaveFileDialog {
 }
 
 function Show-ExportScriptDialog {
+    # Gather only the inputs required for script generation and sanitize the
+    # script base name before any file write happens.
     $dlg = New-StyledDialog "Export Deployment Script" 480 230
     $dlg.Controls.AddRange(@(
         (New-DialogLabel "Script name (no spaces, no extension):" 10 12),
@@ -770,12 +1299,24 @@ function Show-ExportScriptDialog {
     $dlg.CancelButton = $can
 
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and $txtName.Text.Trim() -ne "") {
-        return @{ name = ($txtName.Text.Trim() -replace '\s+','_'); description = $txtDesc.Text.Trim() }
+        $safeName = ConvertTo-SafeFileBaseName $txtName.Text
+        if (-not (Test-HasText $safeName)) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Invalid script name. Use letters, numbers, underscore (_), dash (-), or dot (.).",
+                "Invalid name",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+            return $null
+        }
+        return @{ name = $safeName; description = $txtDesc.Text.Trim() }
     }
     return $null
 }
 
 function Show-LinkDialog($title, $defaultName = "", $defaultUrl = "") {
+    # Reused for add/edit bookmark actions. Validation happens before returning
+    # so callers can assume they receive a usable absolute URL.
     $dlg = New-StyledDialog $title 420 210
     $dlg.Controls.AddRange(@(
         (New-DialogLabel "Name:" 10 14),
@@ -792,7 +1333,17 @@ function Show-LinkDialog($title, $defaultName = "", $defaultUrl = "") {
 
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK `
         -and $txtN.Text.Trim() -ne "" -and $txtU.Text.Trim() -ne "") {
-        return @{ name = $txtN.Text.Trim(); url = $txtU.Text.Trim() }
+        $urlText = $txtU.Text.Trim()
+        if (-not (Test-IsValidHttpUrl $urlText)) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Invalid URL. Only absolute http/https URLs are allowed.",
+                "Invalid URL",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+            return $null
+        }
+        return @{ name = $txtN.Text.Trim(); url = $urlText }
     }
     return $null
 }
@@ -836,6 +1387,8 @@ $btnDelete       = New-TsButton "🗑️ Delete"      "Delete selected item"
 $sep2            = New-Object System.Windows.Forms.ToolStripSeparator
 $btnMoveUp       = New-TsButton "▲ Up"          "Move item up"
 $btnMoveDown     = New-TsButton "▼ Down"        "Move item down"
+$btnUndo         = New-TsButton "↶ Undo"        "Undo last change"
+$btnRedo         = New-TsButton "↷ Redo"        "Redo last undone change"
 $sep3            = New-Object System.Windows.Forms.ToolStripSeparator
 $btnLoad         = New-TsButton "📂 Load"          "Load existing JSON file"
 $btnSave         = New-TsButton "💾 Save"          "Save JSON"
@@ -848,13 +1401,16 @@ $sep5               = New-Object System.Windows.Forms.ToolStripSeparator
 $btnWriteRegistry   = New-TsButton "🖊️ Write to Registry" "Write bookmarks directly to HKLM registry (Chrome + Edge)"
 $btnWriteRegistry.ForeColor = $clrWarn
 $btnWriteRegistry.Available = $isAdmin
+$sep6               = New-Object System.Windows.Forms.ToolStripSeparator
+$btnValidateContract = New-TsButton "✅ Validate" "Run JSON import/export roundtrip contract test"
 
 $toolStrip.Items.AddRange(@(
     $btnAddFolder, $btnAddSubFolder, $btnAddLink, $btnAddRootLink,
-    $sep1, $btnEdit, $btnDelete, $sep2, $btnMoveUp, $btnMoveDown,
+    $sep1, $btnEdit, $btnDelete, $sep2, $btnMoveUp, $btnMoveDown, $btnUndo, $btnRedo,
     $sep3, $btnLoad, $btnSave, $btnCopy,
     $sep4, $btnExportScript,
-    $sep5, $btnWriteRegistry
+    $sep5, $btnWriteRegistry,
+    $sep6, $btnValidateContract
 ))
 #endregion
 
@@ -906,7 +1462,12 @@ $txtWrapper.Controls.Add($script:txtTopLevelName)
 $pnlBarLabel.Controls.Add($txtWrapper)       # index 0 — Fill (claims last)
 $pnlBarLabel.Controls.Add($lblBarNameStatic) # index 1 — Left (claims first)
 
-$script:txtTopLevelName.add_TextChanged({ Update-Preview })
+$script:txtTopLevelName.add_TextChanged({
+    Update-Preview
+    if (-not $script:isRestoringEditorState) {
+        $script:autosaveIsDirty = $true
+    }
+})
 
 # ── TreeView
 $script:tree               = New-Object System.Windows.Forms.TreeView
@@ -1077,6 +1638,9 @@ $form.Controls.AddRange(@($toolStrip, $contentPanel, $separator1, $actionLabel, 
 
 #region ── Layout ────────────────────────────────────────────────────────────
 function Invoke-Layout {
+    # Centralized manual layout so the form keeps predictable spacing when the
+    # window is resized. Positions are computed from the bottom up because the
+    # signature and status area reserve fixed vertical space.
     $w      = $form.ClientSize.Width
     $h      = $form.ClientSize.Height
     $margin = 16
@@ -1102,6 +1666,13 @@ function Invoke-Layout {
 
 $form.add_Load({
     Invoke-Layout
+
+    # Initialize recovery and, if needed, offer restoring the previous session.
+    Initialize-RecoveryStorage
+    Start-ErrorMonitoring
+    Try-RestoreRecoverySnapshot | Out-Null
+    Start-RecoverySession
+
     if ($script:configWarnings.Count -gt 0) {
         Set-StatusLabel $actionLabel "Config incomplete — missing keys: $($script:configWarnings -join ', ')" 'warn'
     }
@@ -1109,6 +1680,12 @@ $form.add_Load({
 
 })
 $form.add_Resize({ Invoke-Layout })
+$form.add_FormClosing({
+    # Ensure lock file cleanup and a last snapshot on normal app shutdown.
+    Stop-RecoverySession
+    Sync-GlobalErrorLog
+    Stop-ErrorMonitoring
+})
 #endregion
 
 #region ── Button events ─────────────────────────────────────────────────────
@@ -1117,6 +1694,7 @@ $form.add_Resize({ Invoke-Layout })
 $btnAddFolder.add_Click({
     $name = Show-FolderDialog "New root folder"
     if ($null -eq $name) { return }
+    Push-UndoState
     $node = New-FolderNode $name
     $script:bookmarks.Add($node)
     Add-TreeNode $null $node | Out-Null
@@ -1136,6 +1714,7 @@ $btnAddSubFolder.add_Click({
     }
     $name = Show-FolderDialog "New subfolder"
     if ($null -eq $name) { return }
+    Push-UndoState
     $node = New-FolderNode $name
     $sel.Tag.children.Add($node)
     Add-TreeNode $sel $node | Out-Null
@@ -1156,6 +1735,7 @@ $btnAddLink.add_Click({
     }
     $result = Show-LinkDialog "New link"
     if ($null -eq $result) { return }
+    Push-UndoState
     $node = New-UrlNode $result.name $result.url
     $sel.Tag.children.Add($node)
     Add-TreeNode $sel $node | Out-Null
@@ -1172,6 +1752,7 @@ $btnAddLink.add_Click({
 $btnAddRootLink.add_Click({
     $result = Show-LinkDialog "New root link"
     if ($null -eq $result) { return }
+    Push-UndoState
     $node = New-UrlNode $result.name $result.url
     $script:bookmarks.Add($node)
     Add-TreeNode $null $node | Out-Null
@@ -1190,6 +1771,7 @@ $btnEdit.add_Click({
         return
     }
     $d = $sel.Tag
+    Push-UndoState
     if ($d.type -eq "folder") {
         $name = Show-FolderDialog "Edit folder" $d.name
         if ($null -eq $name) { return }
@@ -1217,6 +1799,7 @@ $btnDelete.add_Click({
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    Push-UndoState
 
     $outList = $null; $outParent = $null
     Find-ParentList $sel.Tag ([ref]$outList) ([ref]$outParent) | Out-Null
@@ -1237,6 +1820,7 @@ $btnMoveUp.add_Click({
     Find-ParentList $sel.Tag ([ref]$outList) ([ref]$outParent) | Out-Null
     $idx = $outList.IndexOf($sel.Tag)
     if ($idx -le 0) { return }
+    Push-UndoState
     $outList.RemoveAt($idx)
     $outList.Insert($idx - 1, $sel.Tag)
     $data = $sel.Tag
@@ -1253,6 +1837,7 @@ $btnMoveDown.add_Click({
     Find-ParentList $sel.Tag ([ref]$outList) ([ref]$outParent) | Out-Null
     $idx = $outList.IndexOf($sel.Tag)
     if ($idx -ge $outList.Count - 1) { return }
+    Push-UndoState
     $outList.RemoveAt($idx)
     $outList.Insert($idx + 1, $sel.Tag)
     $data = $sel.Tag
@@ -1277,14 +1862,17 @@ $btnLoad.add_Click({
     Add-LogEntry "Loading file" 'step'
     Add-LogKeyValue "Path" $ofd.FileName
     try {
+        Push-UndoState
         Import-JsonString (Get-Content $ofd.FileName -Raw -Encoding UTF8)
         Add-LogEntry "File loaded" 'ok'
         Add-LogKeyValue "Root items" "$($script:bookmarks.Count)"
         Set-StatusLabel $actionLabel "Loaded: $($ofd.SafeFileName)" 'ok'
     } catch {
+        Mark-ErrorRecordSeen $_
         Add-LogEntry "Error loading file" 'fail' -ErrorMessage $_.Exception.Message
         Set-StatusLabel $actionLabel "Error loading file." 'fail'
-        [System.Windows.Forms.MessageBox]::Show("Error loading file:`n$($_.Exception.Message)", "Error",
+        $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show("Error loading file:`n$friendly", "Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     }
@@ -1297,7 +1885,18 @@ $btnSave.add_Click({
     if (Test-HasText $GLB_jsonBasePath) {
         # Create the folder automatically when it does not exist yet
         if (-not (Test-Path -LiteralPath $GLB_jsonBasePath)) {
-            New-Item -ItemType Directory -Path $GLB_jsonBasePath -Force | Out-Null
+            try {
+                New-Item -ItemType Directory -Path $GLB_jsonBasePath -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Mark-ErrorRecordSeen $_
+                Add-LogEntry "Could not create JSON target folder" 'fail' -ErrorMessage $_.Exception.Message
+                Set-StatusLabel $actionLabel "Could not create target folder for JSON." 'fail'
+                [System.Windows.Forms.MessageBox]::Show("Could not create JSON folder:`n$GLB_jsonBasePath`n`n$($_.Exception.Message)", "Folder error",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                return
+            }
         }
         $fileName = Show-SaveNameDialog $GLB_jsonBasePath
         if (-not $fileName) { return }
@@ -1323,9 +1922,11 @@ $btnSave.add_Click({
         Add-LogKeyValue "Root items" "$($script:bookmarks.Count)"
         Set-StatusLabel $actionLabel "Saved: $(Split-Path $targetPath -Leaf)" 'ok'
     } catch {
+        Mark-ErrorRecordSeen $_
         Add-LogEntry "Error saving file" 'fail' -ErrorMessage $_.Exception.Message
         Set-StatusLabel $actionLabel "Error saving file." 'fail'
-        [System.Windows.Forms.MessageBox]::Show("Error saving file:`n$($_.Exception.Message)", "Error",
+        $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show("Error saving file:`n$friendly", "Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     }
@@ -1371,7 +1972,18 @@ $btnExportScript.add_Click({
     $fileName   = "$scriptName.ps1"
     if (Test-HasText $GLB_scriptBasePath) {
         if (-not (Test-Path -LiteralPath $GLB_scriptBasePath)) {
-            New-Item -ItemType Directory -Path $GLB_scriptBasePath -Force | Out-Null
+            try {
+                New-Item -ItemType Directory -Path $GLB_scriptBasePath -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Mark-ErrorRecordSeen $_
+                Add-LogEntry "Could not create script target folder" 'fail' -ErrorMessage $_.Exception.Message
+                Set-StatusLabel $actionLabel "Could not create target folder for script export." 'fail'
+                [System.Windows.Forms.MessageBox]::Show("Could not create script folder:`n$GLB_scriptBasePath`n`n$($_.Exception.Message)", "Folder error",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                return
+            }
         }
         $targetPath = Join-Path $GLB_scriptBasePath $fileName
     } else {
@@ -1396,9 +2008,11 @@ $btnExportScript.add_Click({
         Add-LogKeyValue "Script name" $scriptName
         Set-StatusLabel $actionLabel "Script saved: $fileName" 'ok'
     } catch {
+        Mark-ErrorRecordSeen $_
         Add-LogEntry "Error exporting script" 'fail' -ErrorMessage $_.Exception.Message
         Set-StatusLabel $actionLabel "Error saving script." 'fail'
-        [System.Windows.Forms.MessageBox]::Show("Error saving script:`n$($_.Exception.Message)", "Error",
+        $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show("Error saving script:`n$friendly", "Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     }
@@ -1420,17 +2034,56 @@ $btnImportStr.add_Click({
     }
     Add-LogEntry "Importing JSON string" 'step'
     try {
+        Push-UndoState
         Import-JsonString $raw
         $tabControl.SelectedTab = $tabPreview
         Add-LogEntry "JSON string imported" 'ok'
         Add-LogKeyValue "Root items" "$($script:bookmarks.Count)"
         Set-StatusLabel $actionLabel "JSON imported — $($script:bookmarks.Count) root items." 'ok'
     } catch {
+        Mark-ErrorRecordSeen $_
         Add-LogEntry "Invalid JSON" 'fail' -ErrorMessage $_.Exception.Message
         Set-StatusLabel $actionLabel "Invalid JSON." 'fail'
-        [System.Windows.Forms.MessageBox]::Show("Invalid JSON:`n$($_.Exception.Message)", "Error",
+        $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+        [System.Windows.Forms.MessageBox]::Show("Invalid JSON:`n$friendly", "Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+})
+
+$btnUndo.add_Click({
+    if (Invoke-Undo) {
+        Add-LogEntry "Undo applied" 'ok'
+        Set-StatusLabel $actionLabel "Undo applied." 'ok'
+    } else {
+        Set-StatusLabel $actionLabel "Nothing to undo." 'warn'
+    }
+})
+
+$btnRedo.add_Click({
+    if (Invoke-Redo) {
+        Add-LogEntry "Redo applied" 'ok'
+        Set-StatusLabel $actionLabel "Redo applied." 'ok'
+    } else {
+        Set-StatusLabel $actionLabel "Nothing to redo." 'warn'
+    }
+})
+
+$btnValidateContract.add_Click({
+    Add-LogEntry "Running JSON contract test" 'step'
+    try {
+        if (Test-JsonRoundtripContract) {
+            Add-LogEntry "Contract test passed" 'ok'
+            Set-StatusLabel $actionLabel "Contract test passed (import/export roundtrip)." 'ok'
+        } else {
+            Add-LogEntry "Contract test failed" 'fail' -ErrorMessage "Roundtrip produced a different JSON payload."
+            Set-StatusLabel $actionLabel "Contract test failed." 'fail'
+        }
+    }
+    catch {
+        Mark-ErrorRecordSeen $_
+        Add-LogEntry "Contract test error" 'fail' -ErrorMessage $_.Exception.Message
+        Set-StatusLabel $actionLabel "Contract test error." 'fail'
     }
 })
 
@@ -1452,6 +2105,7 @@ if ($isAdmin) {
             Add-LogEntry "Registry value read" 'ok'
             Set-StatusLabel $actionLabel "Registry value loaded ($($entry.Name))." 'ok'
         } catch {
+            Mark-ErrorRecordSeen $_
             $txtReg.Text = ""
             Add-LogEntry "Registry read failed" 'fail' -ErrorMessage $_.Exception.Message
             Set-StatusLabel $actionLabel "Registry key not found or no value set." 'warn'
@@ -1466,15 +2120,18 @@ if ($isAdmin) {
         }
         Add-LogEntry "Importing registry value into editor" 'step'
         try {
+            Push-UndoState
             Import-JsonString $raw
             $tabControl.SelectedTab = $tabPreview
             Add-LogEntry "Registry JSON imported" 'ok'
             Add-LogKeyValue "Root items" "$($script:bookmarks.Count)"
             Set-StatusLabel $actionLabel "Registry JSON loaded — $($script:bookmarks.Count) root items." 'ok'
         } catch {
+            Mark-ErrorRecordSeen $_
             Add-LogEntry "Invalid JSON in registry value" 'fail' -ErrorMessage $_.Exception.Message
             Set-StatusLabel $actionLabel "Registry value is not valid JSON." 'fail'
-            [System.Windows.Forms.MessageBox]::Show("Invalid JSON:`n$($_.Exception.Message)", "Error",
+            $friendly = ConvertTo-FriendlyErrorMessage $_.Exception.Message
+            [System.Windows.Forms.MessageBox]::Show("Invalid JSON:`n$friendly", "Error",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
         }
@@ -1511,6 +2168,7 @@ if ($isAdmin) {
             Set-ItemProperty -Path $chromePath -Name 'BookmarkBarEnabled' -Value 1     -Type DWord
             Add-LogEntry "Chrome: ManagedBookmarks + BookmarkBarEnabled set" 'ok'
         } catch {
+            Mark-ErrorRecordSeen $_
             $errMessages += "Chrome: $($_.Exception.Message)"
             Add-LogEntry "Chrome registry write failed" 'fail' -ErrorMessage $_.Exception.Message
         }
@@ -1522,6 +2180,7 @@ if ($isAdmin) {
             Set-ItemProperty -Path $edgePath -Name 'FavoritesBarEnabled' -Value 1     -Type DWord
             Add-LogEntry "Edge: ManagedFavorites + FavoritesBarEnabled set" 'ok'
         } catch {
+            Mark-ErrorRecordSeen $_
             $errMessages += "Edge: $($_.Exception.Message)"
             Add-LogEntry "Edge registry write failed" 'fail' -ErrorMessage $_.Exception.Message
         }
@@ -1562,7 +2221,9 @@ if ($script:outputModuleLoaded -and $GLB_logPath -and $logListBox.Items.Count -g
         Write-AppHostMessage "Log written to: $GLB_logPath" "Cyan"
     }
     catch {
+        Mark-ErrorRecordSeen $_
         Write-AppHostMessage "Could not write log: $($_.Exception.Message)" "Yellow"
+        Add-FallbackLogLine -Text 'Primary log write failed' -State 'warn' -ErrorMessage $_.Exception.Message
     }
 }
 #endregion
