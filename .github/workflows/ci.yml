@@ -1,0 +1,53 @@
+name: PowerShell CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-parse:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: Parser check
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem -Path . -Recurse -File -Filter *.ps1 |
+            Where-Object { $_.FullName -notmatch '\\.git\\' }
+
+          $parseErrors = @()
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors) {
+              $parseErrors += $errors | ForEach-Object {
+                "{0}:{1}: {2}" -f $script.FullName, $_.Extent.StartLineNumber, $_.Message
+              }
+            }
+          }
+
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error $_ }
+            throw "Parser errors found."
+          }
+
+      - name: PSScriptAnalyzer (errors only)
+        shell: pwsh
+        run: |
+          Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error | ForEach-Object {
+            "{0}:{1}: {2}" -f $_.ScriptName, $_.Line, $_.Message
+          } | Tee-Object -Variable analyzerOutput
+
+          if ($analyzerOutput) {
+            throw "PSScriptAnalyzer reported errors."
+          }
