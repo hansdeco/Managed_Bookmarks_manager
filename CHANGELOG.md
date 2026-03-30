@@ -1,5 +1,43 @@
 ﻿# Changelog
 
+## 2.12.0.0
+
+### Drag & drop reordering and improved Up/Down navigation
+
+#### Drag & drop support
+
+- Implemented full drag-and-drop reordering for the TreeView.
+- Items can be dragged from any position in the tree and dropped anywhere else.
+- Visual feedback: the target node is highlighted in accent blue while dragging.
+- Insert position is determined by the mouse cursor relative to the target node: top half of the node = insert **before**, bottom half = insert **after**.
+- Drops onto the dragged item itself or onto any of its descendants are blocked.
+- Auto-scroll activates when the cursor moves within 20 pixels of the top or bottom edge of the tree.
+- The move is registered on the undo stack; the moved item stays selected after the drop.
+
+#### Up/Down arrows — full flat-list traversal
+
+- Reworked the **▲ Up** and **▼ Down** move logic so items traverse every visual position in the tree, one step at a time.
+- Previously, moving an item at root level (or any parent level) past a sibling folder would skip all children of that folder, causing the item to jump non-consecutively.
+- New behavior:
+  - Moving **down** when the next sibling is a folder → item enters that folder as its **first child**.
+  - Moving **up** when the previous sibling is a folder → item enters that folder as its **last child**.
+  - When at the **top** of a folder → item exits the folder and is placed just **before** the parent folder in the grandparent list.
+  - When at the **bottom** of a folder → item exits the folder and is placed just **after** the parent folder in the grandparent list.
+- Items can now reach any position in the entire tree using only the Up/Down buttons without skipping any intermediate position.
+
+## 2.11.3.0
+
+### Packaged EXE startup stability hardening
+
+- Removed runtime calls to `SetUnhandledExceptionMode` from the application flow.
+- In packaged hosts this call can still surface a startup popup (`Thread exception mode cannot be changed once any Controls are created on the thread.`), even in guarded execution paths.
+- Error monitoring now keeps best-effort exception hooks without forcing exception-mode changes at runtime.
+
+#### User-visible impact
+
+- Packaged `.exe` runs no longer attempt to switch WinForms exception mode during startup/monitoring.
+- Startup popup related to `SetUnhandledExceptionMode` is prevented by design.
+
 ## 2.11.2.0
 
 ### Generated deployment script transcript robustness

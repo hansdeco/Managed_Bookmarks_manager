@@ -1,6 +1,6 @@
 # User Manual - Managed Bookmarks Creator
 
-**Version:** 2.11.0.0
+**Version:** 2.12.0.0
 **Author:** Decoster Hans
 **Script:** `ManagedBookmarksCreator.ps1`
 
@@ -209,8 +209,8 @@ If recovery data is missing or invalid, startup continues safely without blockin
 | `Root link` | Add a bookmark link at the root level | No |
 | `Edit` | Edit the selected item's name / URL | No |
 | `Delete` | Delete the selected item with confirmation | No |
-| `Up` | Move the selected item one position up | No |
-| `Down` | Move the selected item one position down | No |
+| `Up` | Move the selected item one position up; crosses folder boundaries | No |
+| `Down` | Move the selected item one position down; crosses folder boundaries | No |
 | `Undo` | Revert the previous editor change | No |
 | `Redo` | Re-apply the most recently undone change | No |
 | `Load` | Load an existing `managed_bookmarks.json` from disk | No |
@@ -269,7 +269,24 @@ children recursively.
 
 ### Reordering items
 
-Select an item and use **Up** / **Down** to change its position within its parent.
+**Using the toolbar buttons:**
+
+Select an item and use **▲ Up** / **▼ Down** to move it one position at a time through the entire tree.
+
+- Within a folder, the item moves up or down among its siblings normally.
+- When the next sibling is a folder, pressing **Down** moves the item **into** that folder as its first child (and vice versa for **Up** and the last child).
+- When the item reaches the top of a folder, pressing **Up** moves it out to just before the parent folder. When it reaches the bottom, pressing **Down** moves it out to just after the parent folder.
+- This way every visual position in the tree is reachable one step at a time.
+
+**Using drag & drop:**
+
+Click and hold an item, drag it to the desired location, and release the mouse button.
+
+- The target node is highlighted in blue while you drag over it.
+- The **top half** of a node inserts the dragged item **before** that node; the **bottom half** inserts it **after**.
+- Dropping onto a descendant of the dragged item is not allowed.
+- The tree scrolls automatically when you drag near the top or bottom edge.
+- The move is undoable with **↶ Undo**.
 
 ---
 
@@ -483,13 +500,14 @@ Log files older than `LogRetentionDays` are deleted automatically on the next st
 - **Fully embedded JSON** - the generated deployment script contains the JSON as a literal string.
 - **Session log with retention** - older logs are cleaned up automatically.
 - **Fallback diagnostics log** - a plain-text LocalAppData log is kept even without the optional output module.
+- **Drag-and-drop reordering** - items can be dragged to any position in the tree with immediate visual feedback.
+- **Full flat-list Up/Down navigation** - arrow buttons traverse every visual position including across folder boundaries.
 - **MIT licensed usage model** - broad reuse and adaptation are allowed with minimal obligations.
 
 ---
 
 ## Weak points
 
-- **No drag-and-drop reordering** - items can only be moved one step at a time with the Up and Down buttons.
 - **No multi-select** - only one item can be selected, moved, or deleted at a time.
 - **Recovery is single-snapshot** - only the latest state is retained; there is no multi-version recovery history.
 - **Flat file picker for Load** - the standard Windows file picker is still used.
