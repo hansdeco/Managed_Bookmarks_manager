@@ -26,8 +26,8 @@
         Licensed under the MIT License; see LICENSE in this folder.
 #>
 
-$GLB_scriptVersion     = "2.11.3.0"
-$GLB_ScriptUpdateDate  = "25/03/2026"
+$GLB_scriptVersion     = "2.12.0.0"
+$GLB_ScriptUpdateDate  = "30/03/2026"
 $GLB_scriptcontributer = "Decoster Hans"
 $GLB_ScriptTitel       = "Managed Bookmarks Creator"
 
@@ -499,9 +499,12 @@ $fontMono = New-Object System.Drawing.Font("Consolas", 8)
 #region ── Data model ────────────────────────────────────────────────────────
 # Folder : @{ type="folder"; name="..."; children=List[object] }
 # Link   : @{ type="url";    name="..."; url="..."             }
-$script:bookmarks = [System.Collections.Generic.List[object]]::new()
-$script:undoStack = [System.Collections.Generic.List[string]]::new()
-$script:redoStack = [System.Collections.Generic.List[string]]::new()
+$script:bookmarks  = [System.Collections.Generic.List[object]]::new()
+$script:undoStack  = [System.Collections.Generic.List[string]]::new()
+$script:redoStack  = [System.Collections.Generic.List[string]]::new()
+$script:dragNode   = $null   # TreeNode being dragged
+$script:dropTarget = $null   # TreeNode currently highlighted as drop zone
+$script:dropBefore = $true   # insert before ($true) or after ($false) drop target
 
 # -----------------------------------------------------------------------------
 # Autosave / Session-Recovery runtime state
@@ -814,6 +817,14 @@ function Select-ByData($tvNode, $data) {
     # underlying data object so keyboard/move workflows feel continuous.
     if ($tvNode.Tag -eq $data) { $script:tree.SelectedNode = $tvNode; return }
     foreach ($child in $tvNode.Nodes) { Select-ByData $child $data }
+}
+
+function Clear-DropHighlight {
+    if ($null -ne $script:dropTarget) {
+        $script:dropTarget.BackColor = [System.Drawing.Color]::Empty
+        $script:dropTarget.ForeColor = $clrText
+        $script:dropTarget = $null
+    }
 }
 #endregion
 
@@ -1481,6 +1492,7 @@ $script:tree.ShowLines     = $true
 $script:tree.ShowRootLines = $true
 $script:tree.ShowPlusMinus = $true
 $script:tree.Font          = $fontMain
+$script:tree.AllowDrop     = $true
 $script:tree.add_DrawNode({ param($s, $e); $e.DrawDefault = $true })
 
 # Tree (Fill) added first (index 0), bar panel (Top) added second (index 1)
@@ -1819,10 +1831,31 @@ $btnMoveUp.add_Click({
     $outList = $null; $outParent = $null
     Find-ParentList $sel.Tag ([ref]$outList) ([ref]$outParent) | Out-Null
     $idx = $outList.IndexOf($sel.Tag)
-    if ($idx -le 0) { return }
-    Push-UndoState
-    $outList.RemoveAt($idx)
-    $outList.Insert($idx - 1, $sel.Tag)
+    if ($idx -gt 0) {
+        $prevSibling = $outList[$idx - 1]
+        if ($prevSibling.type -eq "folder") {
+            # Previous sibling is a folder — enter it as last child so the item
+            # moves through every visual position instead of skipping the folder.
+            Push-UndoState
+            $outList.RemoveAt($idx)
+            $prevSibling.children.Add($sel.Tag) | Out-Null
+        } else {
+            # Normal swap with the item directly above.
+            Push-UndoState
+            $outList.RemoveAt($idx)
+            $outList.Insert($idx - 1, $sel.Tag)
+        }
+    } elseif ($null -ne $outParent) {
+        # At top of folder — move item out, just before the parent folder.
+        $grandList = $null; $grandParent = $null
+        Find-ParentList $outParent ([ref]$grandList) ([ref]$grandParent) | Out-Null
+        $folderIdx = $grandList.IndexOf($outParent)
+        Push-UndoState
+        $outList.RemoveAt($idx)
+        $grandList.Insert($folderIdx, $sel.Tag)
+    } else {
+        return  # already at very top of root list
+    }
     $data = $sel.Tag
     Update-Tree
     foreach ($tv in $script:tree.Nodes) { Select-ByData $tv $data }
@@ -1836,11 +1869,140 @@ $btnMoveDown.add_Click({
     $outList = $null; $outParent = $null
     Find-ParentList $sel.Tag ([ref]$outList) ([ref]$outParent) | Out-Null
     $idx = $outList.IndexOf($sel.Tag)
-    if ($idx -ge $outList.Count - 1) { return }
-    Push-UndoState
-    $outList.RemoveAt($idx)
-    $outList.Insert($idx + 1, $sel.Tag)
+    if ($idx -lt $outList.Count - 1) {
+        $nextSibling = $outList[$idx + 1]
+        if ($nextSibling.type -eq "folder") {
+            # Next sibling is a folder — enter it as first child so the item
+            # moves through every visual position instead of skipping the folder.
+            Push-UndoState
+            $outList.RemoveAt($idx)
+            $nextSibling.children.Insert(0, $sel.Tag)
+        } else {
+            # Normal swap with the item directly below.
+            Push-UndoState
+            $outList.RemoveAt($idx)
+            $outList.Insert($idx + 1, $sel.Tag)
+        }
+    } elseif ($null -ne $outParent) {
+        # At bottom of folder — move item out, just after the parent folder.
+        $grandList = $null; $grandParent = $null
+        Find-ParentList $outParent ([ref]$grandList) ([ref]$grandParent) | Out-Null
+        $folderIdx = $grandList.IndexOf($outParent)
+        Push-UndoState
+        $outList.RemoveAt($idx)
+        $grandList.Insert($folderIdx + 1, $sel.Tag)
+    } else {
+        return  # already at very bottom of root list
+    }
     $data = $sel.Tag
+    Update-Tree
+    foreach ($tv in $script:tree.Nodes) { Select-ByData $tv $data }
+    Update-Preview
+})
+
+# ── Drag & Drop ──────────────────────────────────────────────────────────────
+
+# Start drag when the user drags a tree node with the left mouse button.
+$script:tree.add_ItemDrag({
+    param($s, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    $script:dragNode = $e.Item
+    [void]$script:tree.DoDragDrop($e.Item, [System.Windows.Forms.DragDropEffects]::Move)
+})
+
+# Accept only TreeNode data dragged from this tree itself.
+$script:tree.add_DragEnter({
+    param($s, $e)
+    if ($e.Data.GetDataPresent([System.Windows.Forms.TreeNode])) {
+        $e.Effect = [System.Windows.Forms.DragDropEffects]::Move
+    } else {
+        $e.Effect = [System.Windows.Forms.DragDropEffects]::None
+    }
+})
+
+# Highlight the target node and track insert-before/after as the cursor moves.
+$script:tree.add_DragOver({
+    param($s, $e)
+    $e.Effect = [System.Windows.Forms.DragDropEffects]::Move
+    $pt         = $script:tree.PointToClient([System.Drawing.Point]::new($e.X, $e.Y))
+    $targetNode = $script:tree.GetNodeAt($pt)
+
+    # No valid target: clear any existing highlight.
+    if ($null -eq $targetNode -or $targetNode -eq $script:dragNode) {
+        Clear-DropHighlight
+        return
+    }
+
+    # Do not allow dropping onto a descendant of the dragged node.
+    $check = $targetNode.Parent
+    while ($null -ne $check) {
+        if ($check -eq $script:dragNode) { Clear-DropHighlight; return }
+        $check = $check.Parent
+    }
+
+    # Determine insert position: top half → before, bottom half → after.
+    $script:dropBefore = ($pt.Y - $targetNode.Bounds.Top) -lt ($targetNode.Bounds.Height / 2)
+
+    # Update highlight only when the target node changes.
+    if ($script:dropTarget -ne $targetNode) {
+        Clear-DropHighlight
+        $script:dropTarget           = $targetNode
+        $script:dropTarget.BackColor = $clrAccent
+        $script:dropTarget.ForeColor = [System.Drawing.Color]::White
+    }
+
+    # Auto-scroll when the cursor is near the top or bottom edge.
+    if ($pt.Y -lt 20 -and $null -ne $script:tree.TopNode) {
+        $prev = $script:tree.TopNode.PrevVisibleNode
+        if ($null -ne $prev) { $script:tree.TopNode = $prev }
+    } elseif ($pt.Y -gt ($script:tree.Height - 20) -and $null -ne $script:tree.TopNode) {
+        $next = $script:tree.TopNode.NextVisibleNode
+        if ($null -ne $next) { $script:tree.TopNode = $next }
+    }
+})
+
+# Clear highlight when the cursor leaves the tree without dropping.
+$script:tree.add_DragLeave({ Clear-DropHighlight })
+
+# Perform the actual move in the data model when the user releases the mouse.
+$script:tree.add_DragDrop({
+    param($s, $e)
+    Clear-DropHighlight
+
+    $pt         = $script:tree.PointToClient([System.Drawing.Point]::new($e.X, $e.Y))
+    $targetNode = $script:tree.GetNodeAt($pt)
+    if ($null -eq $targetNode -or $targetNode -eq $script:dragNode) { return }
+
+    # Reject drops onto descendants of the dragged node.
+    $check = $targetNode.Parent
+    while ($null -ne $check) {
+        if ($check -eq $script:dragNode) { return }
+        $check = $check.Parent
+    }
+
+    $dragData     = $script:dragNode.Tag
+    $targetData   = $targetNode.Tag
+    $insertBefore = $script:dropBefore
+
+    # Locate the dragged item in the data model and remove it.
+    $dragList = $null; $dragParent = $null
+    Find-ParentList $dragData ([ref]$dragList) ([ref]$dragParent) | Out-Null
+    $dragIdx = $dragList.IndexOf($dragData)
+    Push-UndoState
+    $dragList.RemoveAt($dragIdx)
+
+    # Re-locate the target after removal (its index may have shifted).
+    $targetList = $null; $targetParent = $null
+    Find-ParentList $targetData ([ref]$targetList) ([ref]$targetParent) | Out-Null
+    $targetIdx = $targetList.IndexOf($targetData)
+
+    if ($insertBefore) {
+        $targetList.Insert($targetIdx, $dragData)
+    } else {
+        $targetList.Insert($targetIdx + 1, $dragData)
+    }
+
+    $data = $dragData
     Update-Tree
     foreach ($tv in $script:tree.Nodes) { Select-ByData $tv $data }
     Update-Preview
